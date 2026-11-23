@@ -1,19 +1,14 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
 import 'dart:ui';
 import 'dart:math' as math;
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
-import 'package:flutter_tts/flutter_tts.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
-import 'package:shelf/shelf.dart' as shelf;
-import 'package:shelf/shelf_io.dart' as shelf_io;
-import 'package:shelf_web_socket/shelf_web_socket.dart';
-import 'package:web_socket_channel/web_socket_channel.dart';
 import 'services/db_ssd_service.dart';
+import 'services/lan_server_service.dart';
+import 'widgets/karaoke_dialogs.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -47,15 +42,10 @@ class KaraokeHomeScreen extends StatefulWidget {
 class _KaraokeHomeScreenState extends State<KaraokeHomeScreen>
     with SingleTickerProviderStateMixin {
   final DbSsdService _service = DbSsdService();
+  late final LanServerService _lanServer;
   late final Player _player;
   late final VideoController _videoController;
-  final FlutterTts _tts = FlutterTts();
   late final AnimationController _bounceController;
-
-  HttpServer? _httpServer;
-  String _lanIp = 'Detecting...';
-  final int _serverPort = 8080;
-  final Set<WebSocketChannel> _wsClients = {};
 
   String _currentView = 'HOME';
   bool _showMyanmarSubPopup = false;
@@ -107,7 +97,6 @@ class _KaraokeHomeScreenState extends State<KaraokeHomeScreen>
     final fc = (song['file_code'] ?? '').toString().trim();
     return fc.replaceFirst(RegExp(r'^[aA]'), '');
   }
-
   @override
   void initState() {
     super.initState();
@@ -117,17 +106,27 @@ class _KaraokeHomeScreenState extends State<KaraokeHomeScreen>
       vsync: this,
       duration: const Duration(milliseconds: 1600),
     )..repeat(reverse: true);
-    _initTts();
-    _initSystem();
-    _startLanServer();
-  }
 
-  Future<void> _initTts() async {
-    try {
-      await _tts.setLanguage('en-US');
-      await _tts.setSpeechRate(0.5);
-      await _tts.setVolume(1.0);
-    } catch (_) {}
+    _lanServer = LanServerService(
+      dbService: _service,
+      onCommand: _handleRemoteCommand,
+      getStatePayload: () => {
+        'type': 'STATE',
+        'currentSong': _currentSong,
+        'queue': _queue,
+        'volume': _volume,
+        'isMuted': _isMuted,
+        'audioChannelMode': _audioChannelMode,
+        'selectedAudioTrackIndex': _selectedAudioTrackIndex,
+        'isDbReady': _service.isDbReady,
+        'scannedFileCount': _service.scannedFileCount,
+      },
+    );
+
+    _initSystem();
+    _lanServer.start(onReady: () {
+      if (mounted) setState(() {});
+    });
   }
 
   Future<void> _initSystem() async {
@@ -135,247 +134,107 @@ class _KaraokeHomeScreenState extends State<KaraokeHomeScreen>
     await _service.loadSavedSsdPath();
     if (mounted) {
       setState(() {});
-      _broadcastState();
+      _lanServer.broadcast();
     }
   }
 
-  Future<void> _startLanServer() async {
-    try {
-      final interfaces = await NetworkInterface.list(
-        type: InternetAddressType.IPv4,
-        includeLoopback: false,
-      );
-      if (interfaces.isNotEmpty && interfaces.first.addresses.isNotEmpty) {
-        _lanIp = interfaces.first.addresses.first.address;
-      } else {
-        _lanIp = '127.0.0.1';
-      }
-    } catch (_) {
-      _lanIp = '127.0.0.1';
-    }
-
-    final wsHandler = webSocketHandler((WebSocketChannel webSocket) {
-      _wsClients.add(webSocket);
-      _sendStateToClient(webSocket);
-      webSocket.stream.listen(
-        (message) async => await _handleRemoteCommand(message.toString()),
-        onDone: () => _wsClients.remove(webSocket),
-        onError: (_) => _wsClients.remove(webSocket),
-      );
-    });
-
-    Future<shelf.Response> httpHandler(shelf.Request request) async {
-      final path = request.url.path;
-      final params = request.url.queryParameters;
-
-      if (path == 'ws') return wsHandler(request);
-
-      if (path == 'api/songs') {
-        final mode = params['mode'] ?? 'ALL';
-        final query = params['query'] ?? '';
-        final fullText = params['fullText'] == 'true';
-        final list = mode.toUpperCase() == 'DISCO'
-            ? _service.getDiscoFolderSongs(query: query)
-            : await _service.searchSongs(
-                mode: mode, query: query, fullText: fullText, limit: null);
-        return _jsonResponse(list);
-      }
-
-      if (path == 'api/artists') {
-        final list = await _service.getDistinctArtists(
-          initial: params['initial'] ?? '',
-          gender: params['gender'] ?? 'ALL',
-          fullText: params['fullText'] == 'true',
-        );
-        return _jsonResponse(list);
-      }
-
-      if (path == 'api/albums') {
-        final list = await _service.getDistinctAlbums(
-          initial: params['initial'] ?? '',
-          category: params['category'] ?? 'ALL',
-          fullText: params['fullText'] == 'true',
-        );
-        return _jsonResponse(list);
-      }
-
-      if (path == 'api/songs_by_field') {
-        final list = await _service.getSongsByExactField(
-          field: params['field'] ?? 'artist',
-          value: params['value'] ?? '',
-        );
-        return _jsonResponse(list);
-      }
-
-      if (path == 'api/photo') {
-        final no = int.tryParse(params['no'] ?? '0') ?? 0;
-        final bytes = await _service.getPhotoByNo(no,
-            isAlbum: params['isAlbum'] == 'true');
-        if (bytes != null) {
-          return shelf.Response.ok(bytes,
-              headers: {'Content-Type': 'image/jpeg'});
+  Future<void> _handleRemoteCommand(Map<String, dynamic> cmd) async {
+    final String action = cmd['action'] ?? '';
+    switch (action) {
+      case 'PLAY_SONG':
+        await _playSong(Map<String, dynamic>.from(cmd['song']),
+            keepListOpen: _showMenuOverlay);
+        break;
+      case 'ADD_QUEUE':
+        setState(() => _queue.add(Map<String, dynamic>.from(cmd['song'])));
+        _lanServer.broadcast();
+        break;
+      case 'REMOVE_QUEUE':
+        final int idx = cmd['index'] ?? -1;
+        if (idx >= 0 && idx < _queue.length) {
+          setState(() => _queue.removeAt(idx));
+          _lanServer.broadcast();
         }
-        return shelf.Response.notFound('No photo');
-      }
-
-      return shelf.Response.ok('NMH Karaoke PC Server Running');
-    }
-
-    try {
-      _httpServer = await shelf_io.serve(
-        httpHandler,
-        InternetAddress.anyIPv4,
-        _serverPort,
-      );
-      if (mounted) setState(() {});
-    } catch (_) {}
-  }
-
-  shelf.Response _jsonResponse(dynamic data) {
-    return shelf.Response.ok(
-      jsonEncode(data),
-      headers: {'Content-Type': 'application/json; charset=utf-8'},
-    );
-  }
-
-  Map<String, dynamic> _buildStatePayload() {
-    return {
-      'type': 'STATE',
-      'currentSong': _currentSong,
-      'queue': _queue,
-      'volume': _volume,
-      'isMuted': _isMuted,
-      'audioChannelMode': _audioChannelMode,
-      'selectedAudioTrackIndex': _selectedAudioTrackIndex,
-      'isDbReady': _service.isDbReady,
-      'scannedFileCount': _service.scannedFileCount,
-    };
-  }
-
-  void _sendStateToClient(WebSocketChannel client) {
-    try {
-      client.sink.add(jsonEncode(_buildStatePayload()));
-    } catch (_) {}
-  }
-
-  void _broadcastState() {
-    final payload = jsonEncode(_buildStatePayload());
-    for (final client in _wsClients.toList()) {
-      try {
-        client.sink.add(payload);
-      } catch (_) {
-        _wsClients.remove(client);
-      }
-    }
-  }
-    Future<void> _handleRemoteCommand(String raw) async {
-    try {
-      final Map<String, dynamic> cmd = jsonDecode(raw);
-      final String action = cmd['action'] ?? '';
-
-      switch (action) {
-        case 'PLAY_SONG':
-          final song = Map<String, dynamic>.from(cmd['song']);
-          await _playSong(song, keepListOpen: _showMenuOverlay);
-          break;
-        case 'ADD_QUEUE':
-          final song = Map<String, dynamic>.from(cmd['song']);
-          setState(() => _queue.add(song));
-          _broadcastState();
-          break;
-        case 'REMOVE_QUEUE':
-          final int idx = cmd['index'] ?? -1;
-          if (idx >= 0 && idx < _queue.length) {
-            setState(() => _queue.removeAt(idx));
-            _broadcastState();
-          }
-          break;
-        case 'MOVE_QUEUE':
-          final int from = cmd['from'] ?? -1;
-          final int to = cmd['to'] ?? -1;
-          if (from >= 0 &&
-              from < _queue.length &&
-              to >= 0 &&
-              to < _queue.length) {
-            setState(() {
-              final item = _queue.removeAt(from);
-              _queue.insert(to, item);
-            });
-            _broadcastState();
-          }
-          break;
-        case 'PLAY_PAUSE':
-          await _player.playOrPause();
-          break;
-        case 'STOP':
-          await _player.stop();
+        break;
+      case 'MOVE_QUEUE':
+        final int from = cmd['from'] ?? -1;
+        final int to = cmd['to'] ?? -1;
+        if (from >= 0 &&
+            from < _queue.length &&
+            to >= 0 &&
+            to < _queue.length) {
           setState(() {
-            _currentSong = null;
-            _currentView = 'HOME';
-            _showMenuOverlay = true;
+            final item = _queue.removeAt(from);
+            _queue.insert(to, item);
           });
-          _broadcastState();
-          break;
-        case 'RESTART':
-          await _player.seek(Duration.zero);
-          break;
-        case 'SEEK_REL':
-          final int sec = cmd['sec'] ?? 0;
-          final pos = _player.state.position + Duration(seconds: sec);
-          await _player.seek(pos < Duration.zero ? Duration.zero : pos);
-          break;
-        case 'NEXT':
-          if (_queue.isNotEmpty) {
-            final nextSong = _queue.removeAt(0);
-            await _playSong(nextSong, keepListOpen: _showMenuOverlay);
-          }
-          break;
-        case 'AUDIO_MODE':
-          await _applyAudioChannel(cmd['mode'] ?? 'Stereo');
-          break;
-        case 'TRACK_INDEX':
-          _selectSpecificAudioTrack(cmd['index'] ?? 0);
-          break;
-        case 'CYCLE_TRACK':
-          _cycleAudioTrack();
-          break;
-        case 'VOLUME':
-          setState(() {
-            _isMuted = false;
-            _volume = (cmd['vol'] as num).toDouble().clamp(0, 100);
-          });
-          await _player.setVolume(_volume);
-          _broadcastState();
-          break;
-        case 'MUTE':
-          setState(() => _isMuted = !_isMuted);
-          await _player.setVolume(_isMuted ? 0.0 : _volume);
-          _broadcastState();
-          break;
-        case 'APPLAUSE':
-          await _playHumanCheerVoice();
-          break;
-      }
-    } catch (_) {}
+          _lanServer.broadcast();
+        }
+        break;
+      case 'PLAY_PAUSE':
+        await _player.playOrPause();
+        break;
+      case 'STOP':
+        await _player.stop();
+        setState(() {
+          _currentSong = null;
+          _currentView = 'HOME';
+          _showMenuOverlay = true;
+        });
+        _lanServer.broadcast();
+        break;
+      case 'RESTART':
+        await _player.seek(Duration.zero);
+        break;
+      case 'SEEK_REL':
+        final pos =
+            _player.state.position + Duration(seconds: cmd['sec'] ?? 0);
+        await _player.seek(pos < Duration.zero ? Duration.zero : pos);
+        break;
+      case 'NEXT':
+        if (_queue.isNotEmpty) {
+          final nextSong = _queue.removeAt(0);
+          await _playSong(nextSong, keepListOpen: _showMenuOverlay);
+        }
+        break;
+      case 'AUDIO_MODE':
+        await _applyAudioChannel(cmd['mode'] ?? 'Stereo');
+        break;
+      case 'TRACK_INDEX':
+        _selectSpecificAudioTrack(cmd['index'] ?? 0);
+        break;
+      case 'CYCLE_TRACK':
+        _cycleAudioTrack();
+        break;
+      case 'VOLUME':
+        setState(() {
+          _isMuted = false;
+          _volume = (cmd['vol'] as num).toDouble().clamp(0, 100);
+        });
+        await _player.setVolume(_volume);
+        _lanServer.broadcast();
+        break;
+      case 'MUTE':
+        setState(() => _isMuted = !_isMuted);
+        await _player.setVolume(_isMuted ? 0.0 : _volume);
+        _lanServer.broadcast();
+        break;
+      case 'APPLAUSE':
+        await _playHumanCheerVoice();
+        break;
+    }
   }
-
   @override
   void dispose() {
-    _httpServer?.close(force: true);
-    for (final c in _wsClients) {
-      c.sink.close();
-    }
+    _lanServer.dispose();
     _bounceController.dispose();
     _fullTextController.dispose();
     _fullTextFocus.dispose();
     _player.dispose();
-    _tts.stop();
     super.dispose();
   }
 
   Future<void> _playHumanCheerVoice() async {
     try {
-      await _tts.stop();
       final sfx = Player();
       await sfx.setVolume(100.0);
       try {
@@ -482,7 +341,6 @@ class _KaraokeHomeScreenState extends State<KaraokeHomeScreen>
         : await _service.searchSongs(mode: 'THINGYAN', query: '', limit: null);
     if (mounted) setState(() => _songResults = songs);
   }
-
   Future<void> _onSearchChanged(String val) async {
     setState(() => _searchQuery = val);
     if (_currentView == 'ARTIST_GRID') {
@@ -514,7 +372,8 @@ class _KaraokeHomeScreenState extends State<KaraokeHomeScreen>
       }
     }
   }
-    Future<void> _playSong(Map<String, dynamic> song,
+
+  Future<void> _playSong(Map<String, dynamic> song,
       {bool keepListOpen = false}) async {
     final String? direct = song['direct_path']?.toString();
     final path = (direct != null && direct.isNotEmpty)
@@ -538,7 +397,7 @@ class _KaraokeHomeScreenState extends State<KaraokeHomeScreen>
       _showMyanmarSubPopup = false;
       _showNumberPopup = false;
     });
-    _broadcastState();
+    _lanServer.broadcast();
 
     await _player.open(Media(path));
     await Future.delayed(const Duration(milliseconds: 350));
@@ -557,7 +416,7 @@ class _KaraokeHomeScreenState extends State<KaraokeHomeScreen>
         await platform?.setProperty('af', '');
       }
     } catch (_) {}
-    _broadcastState();
+    _lanServer.broadcast();
   }
 
   void _selectSpecificAudioTrack(int trackIndex) {
@@ -569,7 +428,7 @@ class _KaraokeHomeScreenState extends State<KaraokeHomeScreen>
     _selectedAudioTrackIndex = safeIdx;
     _player.setAudioTrack(realTracks[safeIdx]);
     setState(() {});
-    _broadcastState();
+    _lanServer.broadcast();
   }
 
   void _cycleAudioTrack() {
@@ -577,101 +436,23 @@ class _KaraokeHomeScreenState extends State<KaraokeHomeScreen>
         .where((t) => t.id != 'auto' && t.id != 'no')
         .toList();
     if (realTracks.length <= 1) return;
-    final nextIdx = (_selectedAudioTrackIndex + 1) % realTracks.length;
-    _selectSpecificAudioTrack(nextIdx);
+    _selectSpecificAudioTrack((_selectedAudioTrackIndex + 1) % realTracks.length);
   }
 
   void _showAudioChannelDialog() {
     final realTracks = _player.state.tracks.audio
         .where((t) => t.id != 'auto' && t.id != 'no')
         .toList();
-
-    showDialog(
+    KaraokeDialogs.showAudioChannelDialog(
       context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: const Color(0xFF141E36),
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(18),
-          side: const BorderSide(color: Color(0xFF00F5D4), width: 1.5),
-        ),
-        title: const Text('Audio Track / Channel ရွေးချယ်ရန်',
-            style: TextStyle(color: Color(0xFFFFD166), fontSize: 16)),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text('1. Audio Tracks (အဆိုပါ / တီးလုံးသီးသန့်):',
-                style: TextStyle(color: Colors.white70, fontSize: 12)),
-            const SizedBox(height: 8),
-            Wrap(
-              spacing: 10,
-              runSpacing: 10,
-              children: [
-                if (realTracks.isEmpty)
-                  const Text('သီချင်းဖွင့်ထားမှ Track ပေါ်ပါမည်',
-                      style: TextStyle(color: Colors.white54, fontSize: 12))
-                else
-                  for (int i = 0; i < realTracks.length; i++)
-                    ChoiceChip(
-                      avatar: Icon(
-                        i == 0 ? Icons.mic : Icons.music_note,
-                        size: 16,
-                        color: _selectedAudioTrackIndex == i
-                            ? Colors.black
-                            : const Color(0xFFFFD166),
-                      ),
-                      label: Text(
-                        i == 0
-                            ? 'Track 1 (Vocal + Music)'
-                            : 'Track ${i + 1} (Karaoke / Music)',
-                        style: const TextStyle(fontWeight: FontWeight.bold),
-                      ),
-                      selected: _selectedAudioTrackIndex == i,
-                      selectedColor: const Color(0xFFFFD166),
-                      labelStyle: TextStyle(
-                        color: _selectedAudioTrackIndex == i
-                            ? Colors.black
-                            : Colors.white,
-                      ),
-                      onSelected: (_) {
-                        _selectSpecificAudioTrack(i);
-                        Navigator.pop(ctx);
-                      },
-                    ),
-              ],
-            ),
-            const SizedBox(height: 14),
-            const Text('2. Left / Right Channel:',
-                style: TextStyle(color: Colors.white70, fontSize: 12)),
-            const SizedBox(height: 8),
-            Wrap(
-              spacing: 10,
-              runSpacing: 10,
-              children: [
-                for (final mode in ['Stereo', 'Left', 'Right'])
-                  ChoiceChip(
-                    label: Text(mode,
-                        style: const TextStyle(fontWeight: FontWeight.bold)),
-                    selected: _audioChannelMode == mode,
-                    selectedColor: const Color(0xFF00F5D4),
-                    labelStyle: TextStyle(
-                      color: _audioChannelMode == mode
-                          ? Colors.black
-                          : Colors.white,
-                    ),
-                    onSelected: (_) {
-                      _applyAudioChannel(mode);
-                      Navigator.pop(ctx);
-                    },
-                  ),
-              ],
-            ),
-          ],
-        ),
-      ),
+      realTracks: realTracks,
+      selectedTrackIndex: _selectedAudioTrackIndex,
+      audioChannelMode: _audioChannelMode,
+      onSelectTrack: _selectSpecificAudioTrack,
+      onSelectChannelMode: _applyAudioChannel,
     );
   }
-    Widget _buildMiniPipVideoBox({double height = 130}) {
+  Widget _buildMiniPipVideoBox({double height = 130}) {
     if (_currentSong == null) return const SizedBox.shrink();
     return GestureDetector(
       onTap: () => setState(() => _showMenuOverlay = false),
@@ -853,12 +634,30 @@ class _KaraokeHomeScreenState extends State<KaraokeHomeScreen>
                 ),
               ),
             ),
-          if (_showNumberPopup) _buildNumberPopupOverlay(),
+          if (_showNumberPopup)
+            KaraokeDialogs.buildNumberPopupOverlay(
+              searchQuery: _searchQuery,
+              onQueryChanged: (q) => setState(() => _searchQuery = q),
+              onSearchSubmit: () async {
+                final songs = await _service.searchSongs(
+                    mode: 'NUMBER', query: _searchQuery, limit: null);
+                if (mounted) {
+                  setState(() {
+                    _showNumberPopup = false;
+                    _showMenuOverlay = true;
+                    _listHeaderTitle = 'Number: $_searchQuery';
+                    _songResults = songs;
+                    _currentView = 'SONG_LIST';
+                  });
+                }
+              },
+              onClose: () => setState(() => _showNumberPopup = false),
+            ),
         ],
       ),
     );
   }
-    Widget _buildTopBar() {
+  Widget _buildTopBar() {
     final bool isHome = _currentView == 'HOME';
     return Container(
       height: 56,
@@ -908,7 +707,7 @@ class _KaraokeHomeScreenState extends State<KaraokeHomeScreen>
                   const Icon(Icons.wifi, color: Color(0xFF00F5D4), size: 15),
                   const SizedBox(width: 5),
                   Text(
-                    'IP: $_lanIp:$_serverPort (${_wsClients.length})',
+                    'IP: ${_lanServer.lanIp}:${_lanServer.port} (${_lanServer.clients.length})',
                     style: const TextStyle(
                         color: Color(0xFFFFD166),
                         fontWeight: FontWeight.bold,
@@ -932,7 +731,7 @@ class _KaraokeHomeScreenState extends State<KaraokeHomeScreen>
                 await _service.pickAndScanSsdFolder();
                 if (mounted) {
                   setState(() {});
-                  _broadcastState();
+                  _lanServer.broadcast();
                 }
               },
             ),
@@ -1040,7 +839,6 @@ class _KaraokeHomeScreenState extends State<KaraokeHomeScreen>
       ),
     );
   }
-
   Widget _topPillBtn({
     IconData? icon,
     required String label,
@@ -1128,7 +926,84 @@ class _KaraokeHomeScreenState extends State<KaraokeHomeScreen>
                   ),
                   const SizedBox(width: 26),
                   _buildMi7MainCard(
-                      Widget _buildMi7MainCard({
+                    title: 'Disco Songs',
+                    subtitle: 'DISCO',
+                    icon: Icons.album_rounded,
+                    accent: const Color(0xFF00F5D4),
+                    isSelected: false,
+                    onTap: () => _openSongTitleView(
+                        category: 'DISCO', title: 'Disco Songs'),
+                  ),
+                  const SizedBox(width: 26),
+                  _buildMi7MainCard(
+                    title: 'Number Input',
+                    subtitle: 'NUMBER',
+                    icon: Icons.dialpad_rounded,
+                    accent: const Color(0xFFFF4D6D),
+                    isSelected: _showNumberPopup,
+                    onTap: () {
+                      _searchQuery = '';
+                      setState(() {
+                        _showMyanmarSubPopup = false;
+                        _showNumberPopup = true;
+                      });
+                    },
+                  ),
+                ],
+              ),
+            ),
+          ),
+          if (_showMyanmarSubPopup)
+            Positioned(
+              bottom: 16,
+              left: 14,
+              right: 14,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.arrow_drop_up,
+                      color: Color(0xFFFFD166), size: 34),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: _subMenuChip('အဆိုတော်', 'နာမည်ဖြင့် ရှာမည်',
+                            Icons.person, const Color(0xFFFF4D6D), _openArtistView),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: _subMenuChip('တေးစီးရီး', 'နာမည်ဖြင့် ရှာမည်',
+                            Icons.album, const Color(0xFFFF9F1C), _openAlbumView),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: _subMenuChip(
+                            'သီချင်းအမည်',
+                            'ဖြင့် ရှာမည်',
+                            Icons.music_note,
+                            const Color(0xFF00BBF9),
+                            () => _openSongTitleView(
+                                category: 'Myanmar', title: 'သီချင်းအမည်')),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: _subMenuChip('သီချင်းစာရင်း', 'ကြည့်မည်',
+                            Icons.menu_book, const Color(0xFF00F5D4), _openSongbookView),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: _subMenuChip('သင်္ကြန်သီချင်း', 'များ ရှာမည်',
+                            Icons.water_drop, const Color(0xFFFFD166), _openThingyanView),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+  Widget _buildMi7MainCard({
     required String title,
     required String subtitle,
     required IconData icon,
@@ -1298,7 +1173,6 @@ class _KaraokeHomeScreenState extends State<KaraokeHomeScreen>
       ),
     );
   }
-
   Widget _buildSingleBookPage(List<Map<String, dynamic>> items) {
     return Container(
       decoration: BoxDecoration(
@@ -1394,7 +1268,8 @@ class _KaraokeHomeScreenState extends State<KaraokeHomeScreen>
       ),
     );
   }
-                      Widget _buildGridWithKeyboard({required bool isAlbum}) {
+
+  Widget _buildGridWithKeyboard({required bool isAlbum}) {
     final items = isAlbum ? _albumResults : _artistResults;
     final bool hasMiniVideo = _currentSong != null;
     return Padding(
@@ -1541,156 +1416,8 @@ class _KaraokeHomeScreenState extends State<KaraokeHomeScreen>
         ],
       ),
     );
-                      }
-                      Widget _buildGridWithKeyboard({required bool isAlbum}) {
-    final items = isAlbum ? _albumResults : _artistResults;
-    final bool hasMiniVideo = _currentSong != null;
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-      child: Row(
-        children: [
-          Expanded(
-            flex: 6,
-            child: Column(
-              children: [
-                Expanded(
-                  child: items.isEmpty
-                      ? Center(
-                          child: Text(
-                              isAlbum
-                                  ? 'တေးစီးရီး မတွေ့ပါ'
-                                  : 'အဆိုတော် မတွေ့ပါ',
-                              style: const TextStyle(color: Colors.white70)))
-                      : GridView.builder(
-                          gridDelegate:
-                              const SliverGridDelegateWithFixedCrossAxisCount(
-                            crossAxisCount: 4,
-                            childAspectRatio: 0.85,
-                            crossAxisSpacing: 8,
-                            mainAxisSpacing: 8,
-                          ),
-                          itemCount: items.length,
-                          itemBuilder: (context, idx) {
-                            final item = items[idx];
-                            final String name =
-                                (isAlbum ? item['album'] : item['artist'])
-                                    .toString();
-                            final int photoNo = (item['id'] as int?) ?? 0;
-                            return InkWell(
-                              onTap: () async {
-                                final songs =
-                                    await _service.getSongsByExactField(
-                                  field: isAlbum ? 'album' : 'artist',
-                                  value: name,
-                                );
-                                if (mounted) {
-                                  setState(() {
-                                    _listHeaderTitle = name;
-                                    _songResults = songs;
-                                    _currentView = 'SONG_LIST';
-                                  });
-                                }
-                              },
-                              child: Container(
-                                decoration: BoxDecoration(
-                                  borderRadius: BorderRadius.circular(14),
-                                  color: Colors.white.withOpacity(0.1),
-                                  border: Border.all(
-                                      color: (isAlbum
-                                              ? const Color(0xFF00F5D4)
-                                              : const Color(0xFFFFD166))
-                                          .withOpacity(0.75)),
-                                ),
-                                child: Column(
-                                  children: [
-                                    Expanded(
-                                      child: FutureBuilder<Uint8List?>(
-                                        future: _service.getPhotoByNo(photoNo,
-                                            isAlbum: isAlbum, name: name),
-                                        builder: (ctx, snap) {
-                                          if (snap.hasData &&
-                                              snap.data != null) {
-                                            return Padding(
-                                              padding: EdgeInsets.all(
-                                                  isAlbum ? 6 : 0),
-                                              child: isAlbum
-                                                  ? ClipOval(
-                                                      child: Image.memory(
-                                                          snap.data!,
-                                                          fit: BoxFit.cover,
-                                                          width: 72,
-                                                          height: 72))
-                                                  : ClipRRect(
-                                                      borderRadius:
-                                                          const BorderRadius
-                                                              .vertical(
-                                                              top: Radius
-                                                                  .circular(
-                                                                      13)),
-                                                      child: Image.memory(
-                                                          snap.data!,
-                                                          fit: BoxFit.cover,
-                                                          width:
-                                                              double.infinity),
-                                                    ),
-                                            );
-                                          }
-                                          return Center(
-                                            child: Icon(
-                                              isAlbum
-                                                  ? Icons.album_rounded
-                                                  : Icons.person_rounded,
-                                              size: 42,
-                                              color: isAlbum
-                                                  ? const Color(0xFF00F5D4)
-                                                  : const Color(0xFFFFD166),
-                                            ),
-                                          );
-                                        },
-                                      ),
-                                    ),
-                                    Container(
-                                      width: double.infinity,
-                                      padding: const EdgeInsets.symmetric(
-                                          vertical: 4, horizontal: 4),
-                                      decoration: BoxDecoration(
-                                        color: isAlbum
-                                            ? Colors.black54
-                                            : const Color(0xFFB91C1C)
-                                                .withOpacity(0.85),
-                                        borderRadius:
-                                            const BorderRadius.vertical(
-                                                bottom: Radius.circular(13)),
-                                      ),
-                                      child: Text(
-                                        name,
-                                        maxLines: 1,
-                                        overflow: TextOverflow.ellipsis,
-                                        textAlign: TextAlign.center,
-                                        style: const TextStyle(
-                                            fontSize: 11,
-                                            fontWeight: FontWeight.bold,
-                                            color: Colors.white),
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            );
-                          },
-                        ),
-                ),
-                if (hasMiniVideo) _buildMiniPipVideoBox(height: 115),
-              ],
-            ),
-          ),
-          const SizedBox(width: 8),
-          Expanded(flex: 4, child: _buildKeyboardPanel()),
-        ],
-      ),
-    );
-                      }
-                      Widget _actionSymbolBtn({
+  }
+  Widget _actionSymbolBtn({
     required String label,
     required IconData icon,
     required Color bgColor,
@@ -1816,7 +1543,7 @@ class _KaraokeHomeScreenState extends State<KaraokeHomeScreen>
                                         bgColor: const Color(0xFFFFD166),
                                         onTap: () {
                                           setState(() => _queue.add(s));
-                                          _broadcastState();
+                                          _lanServer.broadcast();
                                           ScaffoldMessenger.of(context)
                                               .showSnackBar(
                                             SnackBar(
@@ -1855,7 +1582,7 @@ class _KaraokeHomeScreenState extends State<KaraokeHomeScreen>
       ),
     );
   }
-                      Widget _buildThingyanView() {
+  Widget _buildThingyanView() {
     final bool hasMiniVideo = _currentSong != null;
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
@@ -1898,7 +1625,7 @@ class _KaraokeHomeScreenState extends State<KaraokeHomeScreen>
                                 bgColor: const Color(0xFFFFD166),
                                 onTap: () {
                                   setState(() => _queue.add(s));
-                                  _broadcastState();
+                                  _lanServer.broadcast();
                                   ScaffoldMessenger.of(context).showSnackBar(
                                     SnackBar(
                                       duration: const Duration(seconds: 1),
@@ -1968,8 +1695,8 @@ class _KaraokeHomeScreenState extends State<KaraokeHomeScreen>
         ],
       ),
     );
-                      }
-                      Widget _buildKeyboardPanel() {
+  }
+  Widget _buildKeyboardPanel() {
     return Container(
       padding: const EdgeInsets.all(6),
       decoration: BoxDecoration(
@@ -2115,123 +1842,8 @@ class _KaraokeHomeScreenState extends State<KaraokeHomeScreen>
         ],
       ),
     );
-                      }
-                      Widget _buildNumberPopupOverlay() {
-    final keys = [
-      '1', '2', '3', '4', '5', '6',
-      '7', '8', '9', 'Clear', '0', 'Del'
-    ];
-    return Container(
-      color: Colors.black54,
-      child: Center(
-        child: Container(
-          width: 460,
-          height: 250,
-          padding: const EdgeInsets.all(12),
-          decoration: BoxDecoration(
-            color: const Color(0xFF141E36),
-            borderRadius: BorderRadius.circular(20),
-            border: Border.all(color: const Color(0xFFFF4D6D), width: 2),
-          ),
-          child: Column(
-            children: [
-              Row(
-                children: [
-                  Expanded(
-                    child: Container(
-                      height: 36,
-                      padding: const EdgeInsets.symmetric(horizontal: 12),
-                      alignment: Alignment.centerLeft,
-                      decoration: BoxDecoration(
-                        color: Colors.black45,
-                        borderRadius: BorderRadius.circular(10),
-                        border: Border.all(color: const Color(0xFFFFD166)),
-                      ),
-                      child: Text(
-                        _searchQuery.isEmpty
-                            ? 'သီချင်းနံပါတ် ရိုက်ပါ...'
-                            : _searchQuery,
-                        style: const TextStyle(
-                            color: Color(0xFFFFD166),
-                            fontSize: 18,
-                            fontWeight: FontWeight.bold),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  ElevatedButton(
-                    style: ElevatedButton.styleFrom(
-                        backgroundColor: const Color(0xFF00F5D4)),
-                    onPressed: () async {
-                      final songs = await _service.searchSongs(
-                          mode: 'NUMBER', query: _searchQuery, limit: null);
-                      if (mounted) {
-                        setState(() {
-                          _showNumberPopup = false;
-                          _showMenuOverlay = true;
-                          _listHeaderTitle = 'Number: $_searchQuery';
-                          _songResults = songs;
-                          _currentView = 'SONG_LIST';
-                        });
-                      }
-                    },
-                    child: const Text('ရှာမည်',
-                        style: TextStyle(
-                            color: Colors.black, fontWeight: FontWeight.bold)),
-                  ),
-                  IconButton(
-                    icon: const Icon(Icons.close, color: Colors.redAccent),
-                    onPressed: () => setState(() => _showNumberPopup = false),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 8),
-              Expanded(
-                child: GridView.builder(
-                  physics: const NeverScrollableScrollPhysics(),
-                  gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                    crossAxisCount: 6,
-                    childAspectRatio: 1.3,
-                    mainAxisSpacing: 6,
-                    crossAxisSpacing: 6,
-                  ),
-                  itemCount: keys.length,
-                  itemBuilder: (context, idx) {
-                    final k = keys[idx];
-                    return ElevatedButton(
-                      style: ElevatedButton.styleFrom(
-                        padding: EdgeInsets.zero,
-                        backgroundColor: const Color(0xFF1E2D52),
-                        foregroundColor: Colors.white,
-                      ),
-                      onPressed: () {
-                        setState(() {
-                          if (k == 'Clear') {
-                            _searchQuery = '';
-                          } else if (k == 'Del') {
-                            if (_searchQuery.isNotEmpty) {
-                              _searchQuery = _searchQuery.substring(
-                                  0, _searchQuery.length - 1);
-                            }
-                          } else {
-                            _searchQuery += k;
-                          }
-                        });
-                      },
-                      child: Text(k,
-                          style: const TextStyle(
-                              fontSize: 14, fontWeight: FontWeight.bold)),
-                    );
-                  },
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-                      }
-                      Widget _buildQueueView() {
+  }
+  Widget _buildQueueView() {
     final bool hasMiniVideo = _currentSong != null;
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
@@ -2318,7 +1930,7 @@ class _KaraokeHomeScreenState extends State<KaraokeHomeScreen>
                                                     _queue.removeAt(idx);
                                                 _queue.insert(idx - 1, item);
                                               });
-                                              _broadcastState();
+                                              _lanServer.broadcast();
                                             }
                                           : null,
                                     ),
@@ -2337,7 +1949,7 @@ class _KaraokeHomeScreenState extends State<KaraokeHomeScreen>
                                                     _queue.removeAt(idx);
                                                 _queue.insert(idx + 1, item);
                                               });
-                                              _broadcastState();
+                                              _lanServer.broadcast();
                                             }
                                           : null,
                                     ),
@@ -2358,7 +1970,7 @@ class _KaraokeHomeScreenState extends State<KaraokeHomeScreen>
                                       fontSize: 10,
                                       onTap: () {
                                         setState(() => _queue.removeAt(idx));
-                                        _broadcastState();
+                                        _lanServer.broadcast();
                                       },
                                     ),
                                   ],
@@ -2387,8 +1999,8 @@ class _KaraokeHomeScreenState extends State<KaraokeHomeScreen>
         ],
       ),
     );
-                      }
-                      Widget _buildBottomControlBar() {
+  }
+  Widget _buildBottomControlBar() {
     return Container(
       padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 4),
       decoration: BoxDecoration(
@@ -2407,7 +2019,7 @@ class _KaraokeHomeScreenState extends State<KaraokeHomeScreen>
               _currentView = 'HOME';
               _showMenuOverlay = true;
             });
-            _broadcastState();
+            _lanServer.broadcast();
           }),
           _ctrlBtn(Icons.repeat_rounded, 'Repeat', Colors.purpleAccent,
               () => _player.seek(Duration.zero)),
@@ -2457,7 +2069,7 @@ class _KaraokeHomeScreenState extends State<KaraokeHomeScreen>
               _volume = (_volume - 10).clamp(0, 100);
             });
             _player.setVolume(_volume);
-            _broadcastState();
+            _lanServer.broadcast();
           }),
           _ctrlBtn(Icons.volume_up_rounded, 'Volume+', Colors.cyanAccent, () {
             setState(() {
@@ -2465,12 +2077,12 @@ class _KaraokeHomeScreenState extends State<KaraokeHomeScreen>
               _volume = (_volume + 10).clamp(0, 100);
             });
             _player.setVolume(_volume);
-            _broadcastState();
+            _lanServer.broadcast();
           }),
           _ctrlBtn(Icons.volume_off_rounded, 'Mute', Colors.purpleAccent, () {
             setState(() => _isMuted = !_isMuted);
             _player.setVolume(_isMuted ? 0.0 : _volume);
-            _broadcastState();
+            _lanServer.broadcast();
           }),
           _ctrlBtn(Icons.thumb_up_rounded, 'Like', const Color(0xFFFFD166),
               _playHumanCheerVoice),
@@ -2478,7 +2090,6 @@ class _KaraokeHomeScreenState extends State<KaraokeHomeScreen>
               () async {
             await _player.stop();
             await _player.dispose();
-            await _tts.stop();
             exit(0);
           }),
         ],
@@ -2523,5 +2134,20 @@ class _KaraokeHomeScreenState extends State<KaraokeHomeScreen>
       ),
     );
   }
-                    }
-                    
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
