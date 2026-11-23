@@ -1,0 +1,42 @@
+name: Build NMH Karaoke Windows Server
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+
+      - name: Prepare Windows Project & Dependencies
+        shell: pwsh
+        run: |
+          if (!(Test-Path "lib")) { New-Item -ItemType Directory -Path "lib" }
+          if (Test-Path "main.dart") { Move-Item -Force "main.dart" "lib/main.dart" }
+          flutter create --platforms=windows --project-name nmh_karaoke_server .
+          flutter pub get
+
+      - name: Build Windows Release (.exe)
+        shell: pwsh
+        run: |
+          flutter build windows --release
+
+      - name: Package Windows Release Folder
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "build\windows\x64\runner\Release\*" -DestinationPath "NMH_Karaoke_PC_Server_Win64.zip"
+
+      - name: Upload Windows PC Server Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: NMH_Karaoke_PC_Server_Win64
+          path: NMH_Karaoke_PC_Server_Win64.zip
+          
