@@ -1,7 +1,7 @@
 name: nmh_karaoke_server
-description: NMH Karaoke PC Server
+description: NMH Karaoke Windows PC Server & Media Player
 publish_to: 'none'
-version: 2.0.0+1
+version: 1.0.0+1
 
 environment:
   sdk: '>=3.5.0 <4.0.0'
@@ -9,23 +9,22 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+  media_kit: ^1.1.11
+  media_kit_video: ^1.2.5
+  media_kit_libs_windows_video: ^1.0.10
+  sqflite: ^2.4.1
   sqflite_common_ffi: ^2.3.4+4
-  sqlite3_flutter_libs: ^0.5.28
-  path: ^1.9.1
-  file_picker: ^10.1.2
+  path: ^1.9.0
+  path_provider: ^2.1.5
+  file_picker: ^8.1.7
   shared_preferences: ^2.5.3
-  media_kit: ^1.2.6
-  media_kit_video: ^2.0.1
-  media_kit_libs_video: ^1.0.7
   shelf: ^1.4.2
-  shelf_router: ^1.1.4
-  shelf_web_socket: ^2.0.1
+  shelf_web_socket: ^2.0.0
   web_socket_channel: ^3.0.1
-
-dev_dependencies:
-  flutter_launcher_icons: ^0.14.3
 
 flutter:
   uses-material-design: true
   assets:
     - assets/logo.png
+    - assets/applause.wav
+    
