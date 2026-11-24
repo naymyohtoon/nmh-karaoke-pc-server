@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:shelf/shelf.dart' as shelf;
@@ -12,6 +13,7 @@ class LanServerService {
   final Map<String, dynamic> Function() getStatePayload;
 
   HttpServer? _httpServer;
+  Timer? _ipWatchTimer;
   String lanIp = 'Detecting...';
   final int port = 8080;
   final Set<WebSocketChannel> clients = {};
@@ -22,33 +24,79 @@ class LanServerService {
     required this.getStatePayload,
   });
 
-  Future<void> start({required void Function() onReady}) async {
+  Future<String> refreshIp() async {
     try {
       final interfaces = await NetworkInterface.list(
         type: InternetAddressType.IPv4,
         includeLoopback: false,
       );
-      if (interfaces.isNotEmpty && interfaces.first.addresses.isNotEmpty) {
-        lanIp = interfaces.first.addresses.first.address;
-      } else {
-        lanIp = '127.0.0.1';
+      String? bestIp;
+      for (final iface in interfaces) {
+        final name = iface.name.toLowerCase();
+        // VirtualBox, VMware, WSL, Bluetooth စသည်တို့ကို ကျော်မည်
+        if (name.contains('virtual') ||
+            name.contains('vmware') ||
+            name.contains('wsl') ||
+            name.contains('vethernet') ||
+            name.contains('bluetooth')) {
+          continue;
+        }
+        for (final addr in iface.addresses) {
+          final ip = addr.address;
+          if (ip.startsWith('192.168.') ||
+              ip.startsWith('10.') ||
+              ip.startsWith('172.')) {
+            bestIp = ip;
+            if (name.contains('wi-fi') ||
+                name.contains('wlan') ||
+                name.contains('wireless')) {
+              lanIp = ip;
+              return lanIp;
+            }
+          }
+          bestIp ??= ip;
+        }
       }
+      lanIp = bestIp ?? '127.0.0.1';
     } catch (_) {
       lanIp = '127.0.0.1';
     }
+    return lanIp;
+  }
+
+  Future<void> start({required void Function() onReady}) async {
+    await refreshIp();
+
+    // ဖုန်း Hotspot နောက်မှချိတ်မိလျှင် IP အသစ်ကို ၂ စက္ကန့်တိုင်း အော်တိုပြောင်းပြမည်
+    _ipWatchTimer?.cancel();
+    _ipWatchTimer = Timer.periodic(const Duration(seconds: 2), (_) async {
+      final oldIp = lanIp;
+      final newIp = await refreshIp();
+      if (oldIp != newIp) {
+        onReady();
+      }
+    });
 
     final wsHandler = webSocketHandler((WebSocketChannel webSocket) {
       clients.add(webSocket);
+      onReady();
       sendToClient(webSocket);
       webSocket.stream.listen(
         (message) async {
           try {
-            final cmd = Map<String, dynamic>.from(jsonDecode(message.toString()));
+            final cmd =
+                Map<String, dynamic>.from(jsonDecode(message.toString()));
             await onCommand(cmd);
           } catch (_) {}
         },
-        onDone: () => clients.remove(webSocket),
-        onError: (_) => clients.remove(webSocket),
+        onDone: () {
+          clients.remove(webSocket);
+          onReady();
+        },
+        onError: (_) {
+          clients.remove(webSocket);
+          onReady();
+        },
       );
     });
 
@@ -139,6 +187,7 @@ class LanServerService {
   }
 
   void dispose() {
+    _ipWatchTimer?.cancel();
     _httpServer?.close(force: true);
     for (final c in clients) {
       c.sink.close();
