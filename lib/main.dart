@@ -6,14 +6,25 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
+import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'services/db_ssd_service.dart';
 import 'services/lan_server_service.dart';
 import 'widgets/karaoke_dialogs.dart';
 
 void main() async {
-  WidgetsFlutterBinding.ensureInitialized();
-  MediaKit.ensureInitialized();
-  runApp(const NmhKaraokePcApp());
+  runZonedGuarded(() async {
+    WidgetsFlutterBinding.ensureInitialized();
+    if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) {
+      sqfliteFfiInit();
+      databaseFactory = databaseFactoryFfi;
+    }
+    MediaKit.ensureInitialized();
+    runApp(const NmhKaraokePcApp());
+  }, (error, stack) {
+    try {
+      File('crash_log.txt').writeAsStringSync('$error\n$stack');
+    } catch (_) {}
+  });
 }
 
 class NmhKaraokePcApp extends StatelessWidget {
