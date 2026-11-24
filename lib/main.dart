@@ -238,15 +238,9 @@ class _KaraokeHomeScreenState extends State<KaraokeHomeScreen>
       final sfx = Player();
       await sfx.setVolume(100.0);
       try {
-        await sfx.open(
-          Media(
-              'asset:///assets/CRWDApls_Applause 1 (ID 2363)_BigSoundBank.com (1).wav'),
-        );
+        await sfx.open(Media('asset:///assets/applause.wav'));
       } catch (_) {
-        await sfx.open(
-          Media(
-              'asset:///CRWDApls_Applause 1 (ID 2363)_BigSoundBank.com (1).wav'),
-        );
+        await sfx.open(Media('asset:///applause.wav'));
       }
       Future.delayed(const Duration(seconds: 4), () => sfx.dispose());
     } catch (_) {}
@@ -533,16 +527,31 @@ class _KaraokeHomeScreenState extends State<KaraokeHomeScreen>
         children: [
           if (showBackgroundVideo)
             Positioned.fill(
-              child: GestureDetector(
-                onTap: () {
-                  if (hasPlayingVideo) {
-                    setState(() => _showMenuOverlay = !_showMenuOverlay);
-                  }
-                },
-                child: Container(
-                  color: Colors.black,
-                  child: Center(child: Video(controller: _videoController)),
-                ),
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  Container(
+                    color: Colors.black,
+                    child: Center(
+                      child: Video(
+                        controller: _videoController,
+                        controls: NoVideoControls,
+                      ),
+                    ),
+                  ),
+                  // Windows ပေါ်တွင် Video မျက်နှာပြင်ကို Mouse Click နှိပ်လျှင် Menu ပြန်ပေါ်စေရန်
+                  Positioned.fill(
+                    child: Listener(
+                      behavior: HitTestBehavior.translucent,
+                      onPointerDown: (_) {
+                        if (!_showMenuOverlay) {
+                          setState(() => _showMenuOverlay = true);
+                        }
+                      },
+                      child: Container(color: Colors.transparent),
+                    ),
+                  ),
+                ],
               ),
             ),
           if (_showMenuOverlay || !hasPlayingVideo)
@@ -554,83 +563,40 @@ class _KaraokeHomeScreenState extends State<KaraokeHomeScreen>
                     end: Alignment.bottomRight,
                     colors: showBackgroundVideo
                         ? [
-                            const Color(0xFFCBD5E1).withOpacity(0.32),
-                            const Color(0xFF64748B).withOpacity(0.38),
-                            const Color(0xFF1E293B).withOpacity(0.48),
+                            const Color(0xFF334155).withOpacity(0.35),
+                            const Color(0xFF1E293B).withOpacity(0.45),
+                            const Color(0xFF0F172A).withOpacity(0.55),
                           ]
                         : const [
-                            Color(0xFFCBD5E1),
-                            Color(0xFF64748B),
-                            Color(0xFF1E293B)
+                            Color(0xFF475569),
+                            Color(0xFF1E293B),
+                            Color(0xFF0F172A),
                           ],
-                    stops: const [0.0, 0.45, 1.0],
+                    stops: const [0.0, 0.5, 1.0],
                   ),
                 ),
-                child: Column(
+                child: Stack(
+                  fit: StackFit.expand,
                   children: [
-                    _buildTopBar(),
-                    Expanded(child: _buildMainContent()),
-                    _buildBottomControlBar(),
-                  ],
-                ),
-              ),
-            ),
-          if (keyboardHeight > 0 && _useFullKeyboard)
-            Positioned(
-              left: 12,
-              right: 12,
-              bottom: keyboardHeight + 6,
-              child: Material(
-                elevation: 10,
-                borderRadius: BorderRadius.circular(12),
-                color: const Color(0xFF141E36),
-                child: Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                  decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(12),
-                    border:
-                        Border.all(color: const Color(0xFF00F5D4), width: 2),
-                  ),
-                  child: Row(
-                    children: [
-                      const Icon(Icons.search, color: Color(0xFF00F5D4)),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: TextField(
-                          controller: _fullTextController,
-                          autofocus: true,
-                          style: const TextStyle(
-                              color: Colors.white,
-                              fontSize: 16,
-                              fontWeight: FontWeight.bold),
-                          decoration: const InputDecoration(
-                            border: InputBorder.none,
-                            hintText: 'ရှာလိုသော စာသား ရိုက်ထည့်ပါ...',
-                            hintStyle: TextStyle(color: Colors.white54),
-                            isDense: true,
+                    if (!showBackgroundVideo)
+                      Center(
+                        child: Opacity(
+                          opacity: 0.14,
+                          child: Image.asset(
+                            'assets/logo.png',
+                            width: 420,
+                            fit: BoxFit.contain,
                           ),
-                          onChanged: _onSearchChanged,
                         ),
                       ),
-                      IconButton(
-                        icon: const Icon(Icons.clear, color: Colors.redAccent),
-                        onPressed: () {
-                          _fullTextController.clear();
-                          _onSearchChanged('');
-                        },
-                      ),
-                      ElevatedButton(
-                        style: ElevatedButton.styleFrom(
-                            backgroundColor: const Color(0xFF00F5D4)),
-                        onPressed: () => FocusScope.of(context).unfocus(),
-                        child: const Text('OK',
-                            style: TextStyle(
-                                color: Colors.black,
-                                fontWeight: FontWeight.bold)),
-                      ),
-                    ],
-                  ),
+                    Column(
+                      children: [
+                        _buildTopBar(),
+                        Expanded(child: _buildMainContent()),
+                        _buildBottomControlBar(),
+                      ],
+                    ),
+                  ],
                 ),
               ),
             ),
@@ -695,7 +661,7 @@ class _KaraokeHomeScreenState extends State<KaraokeHomeScreen>
               ),
             ],
             const Spacer(),
-            Container(
+                        Container(
               padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
               decoration: BoxDecoration(
                 color: const Color(0xFF141E36),
@@ -707,7 +673,7 @@ class _KaraokeHomeScreenState extends State<KaraokeHomeScreen>
                   const Icon(Icons.wifi, color: Color(0xFF00F5D4), size: 15),
                   const SizedBox(width: 5),
                   Text(
-                    'IP: ${_lanServer.lanIp}:${_lanServer.port} (${_lanServer.clients.length})',
+                    'IP: ${_lanServer.lanIp} (ဖုန်း: ${_lanServer.clients.length})',
                     style: const TextStyle(
                         color: Color(0xFFFFD166),
                         fontWeight: FontWeight.bold,
