@@ -575,27 +575,29 @@ class _KaraokeHomeScreenState extends State<KaraokeHomeScreen>
                     stops: const [0.0, 0.5, 1.0],
                   ),
                 ),
-                child: Stack(
-                  fit: StackFit.expand,
+                                child: Column(
                   children: [
-                    if (!showBackgroundVideo)
-                      Center(
-                        child: Opacity(
-                          opacity: 0.14,
-                          child: Image.asset(
-                            'assets/logo.png',
-                            width: 420,
-                            fit: BoxFit.contain,
-                          ),
-                        ),
+                    _buildTopBar(),
+                    Expanded(
+                    child: Stack(
+                        fit: StackFit.expand,
+                        children: [
+                          if (!showBackgroundVideo)
+                            Center(
+                              child: Opacity(
+                                opacity: 0.14,
+                                child: Image.asset(
+                                  'assets/logo.png',
+                                  width: 360,
+                                  fit: BoxFit.contain,
+                                ),
+                              ),
+                            ),
+                          _buildMainContent(),
+                        ],
                       ),
-                    Column(
-                      children: [
-                        _buildTopBar(),
-                        Expanded(child: _buildMainContent()),
-                        _buildBottomControlBar(),
-                      ],
                     ),
+                    _buildBottomControlBar(),
                   ],
                 ),
               ),
