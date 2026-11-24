@@ -21,10 +21,9 @@ jobs:
           if (Test-Path "main.dart") { Move-Item -Force "main.dart" "lib/main.dart" }
           if (Test-Path "db_ssd_service.dart") { Move-Item -Force "db_ssd_service.dart" "lib/services/db_ssd_service.dart" }
           flutter create --platforms=windows --project-name nmh_karaoke_server .
-          pip install pillow
-          python -c "from PIL import Image; img = Image.open('assets/logo.png'); img.save('windows/runner/resources/app_icon.ico', format='ICO', sizes=[(256,256), (128,128), (64,64), (48,48), (32,32), (16,16)])"
           flutter config --enable-windows-desktop
           flutter pub get
+          dart run flutter_launcher_icons
 
       - name: Build Windows Release EXE
         run: |
@@ -35,4 +34,4 @@ jobs:
         with:
           name: NMH_Karaoke_PC_Server_Win64
           path: build/windows/x64/runner/Release/
-          
+
