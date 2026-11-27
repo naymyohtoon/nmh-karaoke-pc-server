@@ -192,9 +192,9 @@ class DbSsdService {
       final List<dynamic> whereArgs = [];
 
       if (gender == 'M') {
-        whereClauses.add('gender = 0');
-      } else if (gender == 'F') {
         whereClauses.add('gender = 1');
+      } else if (gender == 'F') {
+        whereClauses.add('gender = 0');
       }
 
       if (initial.isNotEmpty) {
