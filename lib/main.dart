@@ -651,11 +651,10 @@ class _KaraokeHomeScreenState extends State<KaraokeHomeScreen>
           if (isHome) ...[
             ClipRRect(
               borderRadius: BorderRadius.circular(10),
-              child: Container(
-              width: 260,
-              height: 46,
-              alignment: Alignment.centerLeft,
-              child: Image.asset('assets/logo.png', fit: BoxFit.contain),
+              child: SizedBox(
+              width: 265,
+              height: 48,
+              child: Image.asset('assets/logo.png', fit: BoxFit.fill),
               ),
             ),
             if (_currentSong != null) ...[
