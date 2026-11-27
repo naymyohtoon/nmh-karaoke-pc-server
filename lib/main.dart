@@ -594,13 +594,12 @@ class _KaraokeHomeScreenState extends State<KaraokeHomeScreen>
                         fit: StackFit.expand,
                         children: [
                           if (!showBackgroundVideo)
-                            Center(
+                            Positioned.fill(
                               child: Opacity(
-                                opacity: 0.14,
+                                opacity: 0.16,
                                 child: Image.asset(
                                   'assets/logo.png',
-                                  width: 360,
-                                  fit: BoxFit.contain,
+                                  fit: BoxFit.cover,
                                 ),
                               ),
                             ),
@@ -653,14 +652,10 @@ class _KaraokeHomeScreenState extends State<KaraokeHomeScreen>
             ClipRRect(
               borderRadius: BorderRadius.circular(10),
               child: Container(
-                width: 240,
-                height: 46,
-                decoration: BoxDecoration(
-                  border: Border.all(
-                      color: const Color(0xFFFFD166).withOpacity(0.65)),
-                  borderRadius: BorderRadius.circular(10),
-                ),
-                child: Image.asset('assets/logo.png', fit: BoxFit.fill),
+              width: 260,
+              height: 46,
+              alignment: Alignment.centerLeft,
+              child: Image.asset('assets/logo.png', fit: BoxFit.contain),
               ),
             ),
             if (_currentSong != null) ...[
